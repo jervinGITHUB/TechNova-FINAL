@@ -60,11 +60,117 @@ export const getSupabaseClient = (): SupabaseClient | null => {
       auth: {
         persistSession: true,
         autoRefreshToken: true,
+        detectSessionInUrl: true,
       },
     });
     return cachedClient;
   } catch (err) {
     console.error('Failed to initialize Supabase client:', err);
+    return null;
+  }
+};
+
+// =========================================================================
+// Real Supabase Authentication (OAuth Google & Email/Password)
+// =========================================================================
+export const signInWithGoogle = async (redirectTo?: string): Promise<{ data: any; error: any }> => {
+  const client = getSupabaseClient();
+  if (!client) {
+    return {
+      data: null,
+      error: new Error('Supabase is not connected. Please verify your Supabase URL and Anon Key in Vercel environment variables or the connection settings.'),
+    };
+  }
+  const targetRedirect = redirectTo || (typeof window !== 'undefined' ? window.location.origin : '');
+  try {
+    const res = await client.auth.signInWithOAuth({
+      provider: 'google',
+      options: {
+        redirectTo: targetRedirect,
+        queryParams: {
+          access_type: 'offline',
+          prompt: 'consent',
+        },
+      },
+    });
+    return res;
+  } catch (err: any) {
+    return { data: null, error: err };
+  }
+};
+
+export const signInWithEmail = async (
+  email: string,
+  password: string
+): Promise<{ user: any; session: any; error: any }> => {
+  const client = getSupabaseClient();
+  if (!client) {
+    return {
+      user: null,
+      session: null,
+      error: new Error('Supabase is not connected.'),
+    };
+  }
+  try {
+    const { data, error } = await client.auth.signInWithPassword({
+      email,
+      password,
+    });
+    return { user: data?.user || null, session: data?.session || null, error };
+  } catch (err: any) {
+    return { user: null, session: null, error: err };
+  }
+};
+
+export const signUpWithEmail = async (
+  email: string,
+  password: string,
+  username: string,
+  displayName?: string
+): Promise<{ user: any; session: any; error: any }> => {
+  const client = getSupabaseClient();
+  if (!client) {
+    return {
+      user: null,
+      session: null,
+      error: new Error('Supabase is not connected.'),
+    };
+  }
+  const cleanUsername = username.replace(/[^a-zA-Z0-9._]/g, '').toLowerCase();
+  try {
+    const { data, error } = await client.auth.signUp({
+      email,
+      password,
+      options: {
+        data: {
+          username: cleanUsername,
+          full_name: displayName || username,
+        },
+      },
+    });
+    return { user: data?.user || null, session: data?.session || null, error };
+  } catch (err: any) {
+    return { user: null, session: null, error: err };
+  }
+};
+
+export const signOutSupabase = async (): Promise<{ error: any }> => {
+  const client = getSupabaseClient();
+  if (!client) return { error: null };
+  try {
+    return await client.auth.signOut();
+  } catch (err: any) {
+    return { error: err };
+  }
+};
+
+export const getSupabaseAuthSession = async () => {
+  const client = getSupabaseClient();
+  if (!client) return null;
+  try {
+    const { data } = await client.auth.getSession();
+    return data?.session || null;
+  } catch {
     return null;
   }
 };
@@ -202,6 +308,7 @@ export const supabaseDb = {
           sharesCount: row.shares_count || 0,
           viewsCount: row.views_count || '0',
           isLiked: false,
+          createdAt: row.created_at || new Date().toISOString(),
         };
       });
     } catch (e) {
@@ -373,7 +480,7 @@ export const supabaseDb = {
         target_id: report.targetId,
         target_name: report.targetName,
         scenario: report.scenario,
-        description: report.details || report.customReason || '',
+        description: report.description || '',
         status: report.status,
       });
 
@@ -406,6 +513,72 @@ export const supabaseDb = {
       return true;
     } catch (e) {
       console.warn('Supabase insertNotification fallback:', e);
+      return false;
+    }
+  },
+
+  // 8. Live Streams & Live Chat
+  async upsertLiveStream(stream: LiveStream): Promise<boolean> {
+    const client = getSupabaseClient();
+    if (!client) return false;
+
+    try {
+      const { error } = await client.from('livestreams').upsert({
+        id: stream.id,
+        host_id: stream.host.id,
+        host_name: stream.host.displayName,
+        host_avatar: stream.host.avatar,
+        title: stream.title,
+        topic: stream.topic,
+        about_me: stream.aboutMe,
+        viewers_count: stream.viewersCount,
+        is_live: stream.isLive,
+      });
+
+      if (error) throw error;
+      return true;
+    } catch (e) {
+      console.warn('Supabase upsertLiveStream fallback:', e);
+      return false;
+    }
+  },
+
+  async endLiveStream(streamId: string): Promise<boolean> {
+    const client = getSupabaseClient();
+    if (!client) return false;
+
+    try {
+      const { error } = await client
+        .from('livestreams')
+        .update({ is_live: false })
+        .eq('id', streamId);
+
+      if (error) throw error;
+      return true;
+    } catch (e) {
+      console.warn('Supabase endLiveStream fallback:', e);
+      return false;
+    }
+  },
+
+  async insertLiveComment(streamId: string, user: User, text: string): Promise<boolean> {
+    const client = getSupabaseClient();
+    if (!client) return false;
+
+    try {
+      const { error } = await client.from('live_comments').insert({
+        id: `lc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        livestream_id: streamId,
+        user_id: user.id,
+        display_name: user.displayName,
+        avatar: user.avatar,
+        text,
+      });
+
+      if (error) throw error;
+      return true;
+    } catch (e) {
+      console.warn('Supabase insertLiveComment fallback:', e);
       return false;
     }
   },

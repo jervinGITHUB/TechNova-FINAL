@@ -27,7 +27,15 @@ import {
   DEFAULT_USER,
   storage,
 } from '../services/storage';
-import { supabaseDb, getSupabaseConfig } from '../lib/supabase';
+import {
+  supabaseDb,
+  getSupabaseConfig,
+  getSupabaseClient,
+  signInWithGoogle,
+  signInWithEmail,
+  signUpWithEmail,
+  signOutSupabase,
+} from '../lib/supabase';
 
 // Ensure any legacy cached sample data in browser localStorage is wiped on boot
 const EMPTY_RESET_KEY = 'viralhub_empty_reset_v9';
@@ -76,8 +84,9 @@ interface AppContextType {
   currentUser: User | null;
   authView: 'login' | 'register';
   setAuthView: (view: 'login' | 'register') => void;
-  login: (usernameOrEmail: string, password?: string) => boolean;
-  register: (username: string, email: string, password?: string) => boolean;
+  login: (usernameOrEmail: string, password?: string) => Promise<{ success: boolean; message?: string }>;
+  register: (username: string, email: string, password?: string) => Promise<{ success: boolean; message?: string }>;
+  loginWithGoogle: () => Promise<{ success: boolean; message?: string }>;
   logout: () => void;
   quickLoginAs: (userId: string) => void;
 
@@ -175,10 +184,14 @@ interface AppContextType {
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Auth state - initialized with clean default user
+  // Auth state - initialized strictly to null if no authenticated user exists
+  // Guarantees visitors see the login/register page first
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
     const saved = storage.get<User | null>('currentUser', null);
-    return saved || DEFAULT_USER;
+    if (saved && saved.id && (saved.username || saved.displayName) && saved.id !== 'user_main') {
+      return saved;
+    }
+    return null;
   });
   const [authView, setAuthView] = useState<'login' | 'register'>('login');
 
@@ -265,6 +278,82 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  // Sync Supabase user session (Google OAuth or email session) into user profile
+  const handleSupabaseUserSession = async (sbUser: any) => {
+    if (!sbUser) return;
+    const meta = sbUser.user_metadata || {};
+    const email = sbUser.email || '';
+    const displayName = meta.full_name || meta.name || (email ? email.split('@')[0] : 'User');
+    const rawUsername = meta.user_name || meta.preferred_username || (email ? email.split('@')[0] : `user_${sbUser.id.slice(0, 8)}`);
+    const username = rawUsername.replace(/[^a-zA-Z0-9._]/g, '').toLowerCase() || `user_${sbUser.id.slice(0, 6)}`;
+    const avatar = meta.avatar_url || meta.picture || '';
+
+    // Check if user already exists in database
+    let existingUser: User | null = null;
+    try {
+      const remoteUsers = await supabaseDb.fetchUsers();
+      if (remoteUsers) {
+        existingUser = remoteUsers.find(u => u.id === sbUser.id || (email && u.email?.toLowerCase() === email.toLowerCase())) || null;
+      }
+    } catch {
+      // fallback
+    }
+
+    const finalUser: User = {
+      id: sbUser.id,
+      username: existingUser?.username || username,
+      displayName: existingUser?.displayName || displayName,
+      email: email,
+      avatar: existingUser?.avatar || avatar,
+      bio: existingUser?.bio || '',
+      followingCount: existingUser?.followingCount || 0,
+      followersCount: existingUser?.followersCount || 0,
+      likesCount: existingUser?.likesCount || '0',
+      isPrivate: existingUser?.isPrivate || false,
+      role: existingUser?.role || 'creator',
+    };
+
+    setCurrentUser(finalUser);
+    storage.set('currentUser', finalUser);
+    setUsers(prev => {
+      const map = new Map(prev.map(u => [u.id, u]));
+      map.set(finalUser.id, finalUser);
+      return Array.from(map.values());
+    });
+
+    // Record user profile in Supabase database
+    await supabaseDb.upsertUser(finalUser);
+  };
+
+  // Listen to real Supabase Auth events (Google OAuth redirects, session tokens, sign out)
+  useEffect(() => {
+    const client = getSupabaseClient();
+    if (!client) return;
+
+    // Check existing session on load (handles page reload & OAuth redirect callback)
+    client.auth.getSession().then(({ data: { session } }) => {
+      if (session?.user) {
+        handleSupabaseUserSession(session.user);
+      }
+    });
+
+    // Listen to live auth state changes
+    const { data: authSubscription } = client.auth.onAuthStateChange(async (event, session) => {
+      if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
+        if (session?.user) {
+          await handleSupabaseUserSession(session.user);
+        }
+      } else if (event === 'SIGNED_OUT') {
+        setCurrentUser(null);
+        storage.remove('currentUser');
+      }
+    });
+
+    return () => {
+      authSubscription?.subscription?.unsubscribe();
+    };
+  }, []);
+
   useEffect(() => {
     if (getSupabaseConfig().isConnected) {
       syncWithSupabase();
@@ -347,26 +436,65 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const totalUnreadNotifications = userNotifications.filter(n => n.isUnread).length;
 
-  // Auth functions
-  const login = (usernameOrEmail: string): boolean => {
-    const clean = usernameOrEmail.trim().toLowerCase().replace('@', '');
+  // Auth functions with Supabase & Google OAuth integration
+  const login = async (
+    usernameOrEmail: string,
+    password?: string
+  ): Promise<{ success: boolean; message?: string }> => {
+    const trimmed = usernameOrEmail.trim();
+    if (!trimmed) {
+      return { success: false, message: 'Please enter your username or email' };
+    }
+
+    const isEmail = trimmed.includes('@');
+    const config = getSupabaseConfig();
+
+    if (config.isConnected && password) {
+      if (isEmail) {
+        const { user, error } = await signInWithEmail(trimmed, password);
+        if (error) {
+          return { success: false, message: error.message };
+        }
+        if (user) {
+          await handleSupabaseUserSession(user);
+          return { success: true };
+        }
+      } else {
+        // User entered username, look up their email in records
+        const found = users.find(u => u.username.toLowerCase() === trimmed.toLowerCase());
+        if (found && found.email) {
+          const { user, error } = await signInWithEmail(found.email, password);
+          if (error) {
+            return { success: false, message: error.message };
+          }
+          if (user) {
+            await handleSupabaseUserSession(user);
+            return { success: true };
+          }
+        }
+      }
+    }
+
+    // Local / offline fallback
+    const clean = trimmed.toLowerCase().replace('@', '');
     const found = users.find(
       u => u.username.toLowerCase() === clean || u.email.toLowerCase() === clean
     );
     if (found) {
       setCurrentUser(found);
+      storage.set('currentUser', found);
       setActiveConversationId(null);
       setMessagesMobileView('list');
       setSelectedUserId(null);
       supabaseDb.upsertUser(found);
-      return true;
+      return { success: true };
     }
-    // Clean user profile with no sample data
+
     const newUser: User = {
       id: `user_${Date.now()}`,
       username: clean,
       displayName: clean,
-      email: clean ? `${clean}@viralhub.app` : '',
+      email: isEmail ? trimmed : `${clean}@viralhub.app`,
       avatar: '',
       bio: '',
       followingCount: 0,
@@ -377,20 +505,60 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
     setUsers(prev => [newUser, ...prev]);
     setCurrentUser(newUser);
+    storage.set('currentUser', newUser);
     setActiveConversationId(null);
     setMessagesMobileView('list');
     setSelectedUserId(null);
     supabaseDb.upsertUser(newUser);
-    return true;
+    return { success: true };
   };
 
-  const register = (username: string, email: string): boolean => {
-    const clean = username.replace('@', '').trim();
+  const register = async (
+    username: string,
+    email: string,
+    password?: string
+  ): Promise<{ success: boolean; message?: string }> => {
+    const clean = username.replace('@', '').trim().toLowerCase();
+    const cleanEmail = email.trim();
+
+    const config = getSupabaseConfig();
+    if (config.isConnected && password) {
+      const { user, session, error } = await signUpWithEmail(cleanEmail, password, clean, username.trim());
+      if (error) {
+        return { success: false, message: error.message };
+      }
+      if (user) {
+        if (!session) {
+          const pendingUser: User = {
+            id: user.id,
+            username: clean,
+            displayName: username.trim(),
+            email: cleanEmail,
+            avatar: '',
+            bio: '',
+            followingCount: 0,
+            followersCount: 0,
+            likesCount: '0',
+            isPrivate: false,
+            role: 'creator',
+          };
+          await supabaseDb.upsertUser(pendingUser);
+          return {
+            success: true,
+            message: 'Account created! Please check your email to verify your address, or sign in.',
+          };
+        }
+        await handleSupabaseUserSession(user);
+        return { success: true };
+      }
+    }
+
+    // Local / fallback registration
     const newUser: User = {
       id: `user_${Date.now()}`,
       username: clean,
-      displayName: clean,
-      email: email.trim(),
+      displayName: username.trim(),
+      email: cleanEmail,
       avatar: '',
       bio: '',
       followingCount: 0,
@@ -401,14 +569,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
     setUsers(prev => [newUser, ...prev]);
     setCurrentUser(newUser);
+    storage.set('currentUser', newUser);
     setActiveConversationId(null);
     setMessagesMobileView('list');
     setSelectedUserId(null);
     supabaseDb.upsertUser(newUser);
-    return true;
+    return { success: true };
   };
 
-  const logout = () => {
+  const loginWithGoogle = async (): Promise<{ success: boolean; message?: string }> => {
+    const config = getSupabaseConfig();
+    if (!config.isConnected) {
+      return {
+        success: false,
+        message: 'Supabase credentials are not connected. Please verify your Supabase URL and Anon Key in environment variables or configuration.',
+      };
+    }
+
+    const { error } = await signInWithGoogle();
+    if (error) {
+      return { success: false, message: error.message };
+    }
+    return { success: true };
+  };
+
+  const logout = async () => {
+    await signOutSupabase();
     setCurrentUser(null);
     storage.remove('currentUser');
     setActiveConversationId(null);
@@ -655,6 +841,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         status: 'accepted',
       };
       setNotifications(prev => [replyNotif, ...prev]);
+
+      // Record in Supabase database
+      supabaseDb.toggleFollow(requesterId, currentUser.id, true);
+      supabaseDb.toggleFollow(currentUser.id, requesterId, true);
+      supabaseDb.insertNotification(replyNotif, requesterId);
     }
 
     // Remove request from pending follow requests
@@ -856,6 +1047,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         videoId: video.id,
       };
       setNotifications(prev => [newNotif, ...prev]);
+      supabaseDb.insertNotification(newNotif, video.creatorId);
     }
   };
 
@@ -1222,12 +1414,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ...prev,
       messages: [...prev.messages, newLiveMsg],
     }));
+    if (currentLiveStream.id) {
+      supabaseDb.insertLiveComment(currentLiveStream.id, currentUser, text.trim());
+    }
   };
 
   const startHostLiveStream = (title: string, topic: string, aboutMe: string) => {
     if (!currentUser) return;
-    setCurrentLiveStream(prev => ({
-      ...prev,
+    const streamId = currentLiveStream.id || `stream_${currentUser.id}_${Date.now()}`;
+    const newStream: LiveStream = {
+      ...currentLiveStream,
+      id: streamId,
       host: currentUser,
       title: title || "Let's play",
       topic: topic || 'Gaming',
@@ -1235,11 +1432,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       isLive: true,
       timerSeconds: 0,
       viewersCount: 1,
-    }));
+    };
+    setCurrentLiveStream(newStream);
+    supabaseDb.upsertLiveStream(newStream);
     setActiveTab('live_host_active');
   };
 
   const endHostLiveStream = () => {
+    if (currentLiveStream.id) {
+      supabaseDb.endLiveStream(currentLiveStream.id);
+    }
     setCurrentLiveStream(prev => ({
       ...prev,
       isLive: false,
@@ -1277,6 +1479,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setAuthView,
         login,
         register,
+        loginWithGoogle,
         logout,
         quickLoginAs,
         activeTab,

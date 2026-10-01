@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { ViralHubLogo } from '../common/ViralHubLogo';
-import { User as UserIcon, Lock, Database } from 'lucide-react';
+import { User as UserIcon, Lock, CheckCircle2 } from 'lucide-react';
 import { SupabaseVercelModal } from '../modals/SupabaseVercelModal';
 
 export const AuthPage: React.FC = () => {
@@ -10,9 +10,9 @@ export const AuthPage: React.FC = () => {
     setAuthView,
     login,
     register,
+    loginWithGoogle,
     supabaseModalOpen,
     setSupabaseModalOpen,
-    isSupabaseConnected,
     syncWithSupabase,
   } = useApp();
 
@@ -26,18 +26,31 @@ export const AuthPage: React.FC = () => {
   const [regPassword, setRegPassword] = useState('');
   const [regConfirmPassword, setRegConfirmPassword] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
+  const [infoMessage, setInfoMessage] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleLoginSubmit = (e: React.FormEvent) => {
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!loginIdentifier.trim()) {
       setErrorMessage('Please enter your username or email');
       return;
     }
     setErrorMessage('');
-    login(loginIdentifier, loginPassword);
+    setInfoMessage('');
+    setIsSubmitting(true);
+    try {
+      const res = await login(loginIdentifier, loginPassword);
+      if (!res.success && res.message) {
+        setErrorMessage(res.message);
+      }
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Login failed. Please check your credentials.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
-  const handleRegisterSubmit = (e: React.FormEvent) => {
+  const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!regUsername.trim()) {
       setErrorMessage('Please choose a username');
@@ -56,7 +69,38 @@ export const AuthPage: React.FC = () => {
       return;
     }
     setErrorMessage('');
-    register(regUsername, regEmail, regPassword);
+    setInfoMessage('');
+    setIsSubmitting(true);
+    try {
+      const res = await register(regUsername, regEmail, regPassword);
+      if (res.message) {
+        if (!res.success) {
+          setErrorMessage(res.message);
+        } else {
+          setInfoMessage(res.message);
+        }
+      }
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Registration failed');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleGoogleSignIn = async () => {
+    setErrorMessage('');
+    setInfoMessage('');
+    setIsSubmitting(true);
+    try {
+      const res = await loginWithGoogle();
+      if (!res.success && res.message) {
+        setErrorMessage(res.message);
+      }
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Google sign-in could not be initiated.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -65,22 +109,14 @@ export const AuthPage: React.FC = () => {
       <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-[#ff007a]/15 rounded-full blur-3xl pointer-events-none -translate-x-1/2 -translate-y-1/2" />
       <div className="absolute bottom-10 right-10 w-80 h-80 bg-purple-600/10 rounded-full blur-3xl pointer-events-none" />
 
-      {/* Top bar with Brand Logo & Database Connect Button */}
+      {/* Top bar with Brand Logo only (Supabase Connected badge removed) */}
       <div className="w-full flex items-center justify-between z-10">
         <ViralHubLogo size="md" />
-        <button
-          type="button"
-          onClick={() => setSupabaseModalOpen(true)}
-          className="flex items-center gap-2 py-2 px-3.5 rounded-2xl bg-[#14141f] hover:bg-[#1c1c2b] border border-neutral-700/80 text-xs font-semibold text-neutral-300 hover:text-white transition-all shadow-md cursor-pointer"
-        >
-          <Database className={`w-3.5 h-3.5 ${isSupabaseConnected ? 'text-emerald-400' : 'text-amber-400'}`} />
-          <span>{isSupabaseConnected ? 'Supabase Connected' : 'Connect Supabase'}</span>
-        </button>
       </div>
 
-      {/* Main Form Center Card matching Screenshot 6 layout */}
+      {/* Main Form Center Card */}
       <div className="w-full max-w-5xl mx-auto flex flex-col lg:flex-row items-center justify-center gap-12 lg:gap-20 my-auto py-8 z-10">
-        {/* Left Hero Graphic with Brand Logo matching Screenshot 6 */}
+        {/* Left Hero Graphic with Brand Logo */}
         <div className="flex flex-col items-center text-center lg:items-start lg:text-left">
           <div className="mb-4 transform hover:scale-105 transition-transform duration-300">
             <ViralHubLogo size="xl" showText={false} />
@@ -93,17 +129,24 @@ export const AuthPage: React.FC = () => {
           </p>
         </div>
 
-        {/* Right Form Card: Login or Register matching Screenshot 6 */}
+        {/* Right Form Card: Login or Register */}
         <div className="w-full max-w-md bg-[#13131a]/90 border border-neutral-800/90 rounded-3xl p-8 sm:p-10 shadow-2xl backdrop-blur-xl">
           {errorMessage && (
             <div className="mb-5 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-400 text-xs flex items-center gap-2">
-              <span className="w-1.5 h-1.5 rounded-full bg-red-400" />
-              {errorMessage}
+              <span className="w-1.5 h-1.5 rounded-full bg-red-400 shrink-0" />
+              <span>{errorMessage}</span>
+            </div>
+          )}
+
+          {infoMessage && (
+            <div className="mb-5 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+              <span>{infoMessage}</span>
             </div>
           )}
 
           {authView === 'login' ? (
-            /* Login Form matching Screenshot 6 top right */
+            /* Login Form */
             <form onSubmit={handleLoginSubmit} className="flex flex-col">
               <div className="text-center mb-8">
                 <h2 className="text-3xl font-extrabold font-brand tracking-wide text-white">Login</h2>
@@ -158,16 +201,18 @@ export const AuthPage: React.FC = () => {
               {/* Log In Button */}
               <button
                 type="submit"
-                className="mt-6 w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-[#ff007a] to-[#d00062] hover:from-[#ff1a8c] hover:to-[#e6006c] text-white font-semibold text-sm shadow-[0_0_20px_rgba(255,0,122,0.4)] transition-all cursor-pointer transform active:scale-[0.99]"
+                disabled={isSubmitting}
+                className="mt-6 w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-[#ff007a] to-[#d00062] hover:from-[#ff1a8c] hover:to-[#e6006c] text-white font-semibold text-sm shadow-[0_0_20px_rgba(255,0,122,0.4)] transition-all cursor-pointer transform active:scale-[0.99] disabled:opacity-50"
               >
-                Log In
+                {isSubmitting ? 'Signing in...' : 'Log In'}
               </button>
 
-              {/* Google Sign-in */}
+              {/* Continue with Google OAuth Button */}
               <button
                 type="button"
-                onClick={() => login('User')}
-                className="mt-3 w-full py-3 px-4 rounded-xl bg-[#1c1c27] hover:bg-[#232332] border border-neutral-700/80 text-white text-xs font-medium flex items-center justify-center gap-2.5 transition-colors cursor-pointer"
+                disabled={isSubmitting}
+                onClick={handleGoogleSignIn}
+                className="mt-3 w-full py-3 px-4 rounded-xl bg-[#1c1c27] hover:bg-[#232332] border border-neutral-700/80 text-white text-xs font-medium flex items-center justify-center gap-2.5 transition-colors cursor-pointer disabled:opacity-50"
               >
                 <svg className="w-4 h-4" viewBox="0 0 24 24">
                   <path
@@ -187,7 +232,7 @@ export const AuthPage: React.FC = () => {
                     d="M12 23c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3.1 0-5.8-2.1-6.7-5.3L1.6 16c1.9 3.8 5.8 7 10.4 7z"
                   />
                 </svg>
-                <span>Or, sign-in with Google</span>
+                <span>{isSubmitting ? 'Connecting...' : 'Continue with Google'}</span>
               </button>
 
               {/* Bottom switch to Register */}
@@ -197,6 +242,7 @@ export const AuthPage: React.FC = () => {
                   type="button"
                   onClick={() => {
                     setErrorMessage('');
+                    setInfoMessage('');
                     setAuthView('register');
                   }}
                   className="text-[#ff007a] hover:underline font-semibold cursor-pointer"
@@ -206,7 +252,7 @@ export const AuthPage: React.FC = () => {
               </div>
             </form>
           ) : (
-            /* Register Form matching Screenshot 6 top left */
+            /* Register Form */
             <form onSubmit={handleRegisterSubmit} className="flex flex-col">
               <div className="text-center mb-6">
                 <h2 className="text-3xl font-extrabold font-brand tracking-wide text-white">Register</h2>
@@ -276,9 +322,38 @@ export const AuthPage: React.FC = () => {
               {/* Register Submit Button */}
               <button
                 type="submit"
-                className="mt-6 w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-[#ff007a] to-[#d00062] hover:from-[#ff1a8c] hover:to-[#e6006c] text-white font-semibold text-sm shadow-[0_0_20px_rgba(255,0,122,0.4)] transition-all cursor-pointer transform active:scale-[0.99]"
+                disabled={isSubmitting}
+                className="mt-6 w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-[#ff007a] to-[#d00062] hover:from-[#ff1a8c] hover:to-[#e6006c] text-white font-semibold text-sm shadow-[0_0_20px_rgba(255,0,122,0.4)] transition-all cursor-pointer transform active:scale-[0.99] disabled:opacity-50"
               >
-                Register
+                {isSubmitting ? 'Creating account...' : 'Register'}
+              </button>
+
+              {/* Continue with Google OAuth Button */}
+              <button
+                type="button"
+                disabled={isSubmitting}
+                onClick={handleGoogleSignIn}
+                className="mt-3 w-full py-3 px-4 rounded-xl bg-[#1c1c27] hover:bg-[#232332] border border-neutral-700/80 text-white text-xs font-medium flex items-center justify-center gap-2.5 transition-colors cursor-pointer disabled:opacity-50"
+              >
+                <svg className="w-4 h-4" viewBox="0 0 24 24">
+                  <path
+                    fill="#EA4335"
+                    d="M12 5c1.6 0 3 .6 4.1 1.7l3.1-3.1C17.3 1.8 14.8 1 12 1 7.4 1 3.5 3.6 1.6 7.4l3.7 2.9C6.2 7.1 8.9 5 12 5z"
+                  />
+                  <path
+                    fill="#4285F4"
+                    d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.6h6.5c-.3 1.5-1.1 2.8-2.4 3.7l3.7 2.9c2.2-2 3.7-5 3.7-8.9z"
+                  />
+                  <path
+                    fill="#FBBC05"
+                    d="M5.3 14.7c-.2-.7-.4-1.5-.4-2.7s.2-2 .4-2.7L1.6 6.4C.6 8.3 0 10.1 0 12s.6 3.7 1.6 5.6l3.7-2.9z"
+                  />
+                  <path
+                    fill="#34A853"
+                    d="M12 23c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3.1 0-5.8-2.1-6.7-5.3L1.6 16c1.9 3.8 5.8 7 10.4 7z"
+                  />
+                </svg>
+                <span>{isSubmitting ? 'Connecting...' : 'Continue with Google'}</span>
               </button>
 
               {/* Back to Login link */}
@@ -288,6 +363,7 @@ export const AuthPage: React.FC = () => {
                   type="button"
                   onClick={() => {
                     setErrorMessage('');
+                    setInfoMessage('');
                     setAuthView('login');
                   }}
                   className="text-[#ff007a] hover:underline font-semibold cursor-pointer"
